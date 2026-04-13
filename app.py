@@ -2,51 +2,49 @@ import streamlit as st
 import feedparser
 import os
 import json
-import time
-from openai import OpenAI, RateLimitError
+from openai import OpenAI
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 st.set_page_config(page_title="Career OS", layout="wide")
-st.title("🧠 Career OS — Stable Mode")
+st.title("🧠 Career OS — Stable Production Mode")
 
 # -----------------------
-# JOB INGESTION (SMALL + CLEAN)
+# JOB FETCH
 # -----------------------
 def get_jobs():
     feed = feedparser.parse("https://remoteok.com/remote-jobs.rss")
 
     jobs = []
-    for e in feed.entries[:6]:  # keep small to avoid limits
+    for e in feed.entries[:5]:  # KEEP SMALL (prevents token/rate issues)
         jobs.append({
             "title": e.title,
-            "description": e.summary[:300]  # truncate to reduce tokens
+            "description": e.summary[:250]
         })
     return jobs
 
 # -----------------------
-# BATCH SCORING (1 API CALL)
+# OPENAI BATCH SCORING (SAFE)
 # -----------------------
-def score_jobs_batch(jobs):
-
+def score_jobs(jobs):
     prompt = f"""
-You are a job ranking system.
+You are a job ranking AI.
 
-User prefers:
-- structured roles
+Score jobs based on:
 - autonomy
+- clarity
 - career growth
-- low chaos environments
+- low chaos
 
 Return STRICT JSON:
 
 {{
   "results": [
     {{
-      "title": "job title",
+      "title": "string",
       "score": 0-100,
-      "reason": "one sentence",
-      "chaos": "low | medium | high"
+      "reason": "short sentence",
+      "chaos": "low|medium|high"
     }}
   ]
 }}
@@ -55,28 +53,30 @@ Jobs:
 {json.dumps(jobs)}
 """
 
-    for attempt in range(3):
-        try:
-            res = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}]
-            )
+    res = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}]
+    )
 
-            return json.loads(res.choices[0].message.content)["results"]
-
-        except RateLimitError:
-            time.sleep(3)
-
-    return []
+    return json.loads(res.choices[0].message.content)["results"]
 
 # -----------------------
-# RUN
+# CACHED EXECUTION (CRITICAL FIX)
 # -----------------------
-jobs = get_jobs()
-scored = score_jobs_batch(jobs)
+@st.cache_data(ttl=3600)  # runs once per hour
+def cached_scoring():
+    jobs = get_jobs()
+    return score_jobs(jobs)
+
+# -----------------------
+# RUN (NO MULTIPLE CALLS)
+# -----------------------
+st.write("Fetching latest job rankings...")
+
+scored = cached_scoring()
 
 if not scored:
-    st.error("API limit hit — try refreshing in a minute.")
+    st.error("No data returned. Try again later.")
     st.stop()
 
 scored = sorted(scored, key=lambda x: x["score"], reverse=True)
@@ -88,7 +88,7 @@ avoid = scored[-2:]
 # -----------------------
 # UI
 # -----------------------
-st.subheader("🔥 BEST JOB TODAY")
+st.subheader("🔥 BEST JOB")
 
 st.markdown(f"### {best['title']}")
 st.write(best["reason"])
