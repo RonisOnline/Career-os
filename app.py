@@ -2,46 +2,48 @@ import streamlit as st
 import feedparser
 import os
 import json
-from openai import OpenAI
+import time
+from openai import OpenAI, RateLimitError
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-st.set_page_config(page_title="Career OS Elite", layout="wide")
-st.title("🧠 Career OS — Batch Mode (Stable)")
+st.set_page_config(page_title="Career OS", layout="wide")
+st.title("🧠 Career OS — Stable Mode")
 
 # -----------------------
-# JOB INGESTION
+# JOB INGESTION (SMALL + CLEAN)
 # -----------------------
 def get_jobs():
     feed = feedparser.parse("https://remoteok.com/remote-jobs.rss")
 
     jobs = []
-    for e in feed.entries[:10]:  # reduced for stability
+    for e in feed.entries[:6]:  # keep small to avoid limits
         jobs.append({
             "title": e.title,
-            "description": e.summary
+            "description": e.summary[:300]  # truncate to reduce tokens
         })
     return jobs
 
 # -----------------------
-# BATCH AI SCORING (1 CALL)
+# BATCH SCORING (1 API CALL)
 # -----------------------
 def score_jobs_batch(jobs):
-    prompt = f"""
-You are a career job scoring system.
 
-User wants:
+    prompt = f"""
+You are a job ranking system.
+
+User prefers:
 - structured roles
 - autonomy
 - career growth
-- avoid chaotic / vague roles
+- low chaos environments
 
-Return STRICT JSON in this format:
+Return STRICT JSON:
 
 {{
   "results": [
     {{
-      "title": "...",
+      "title": "job title",
       "score": 0-100,
       "reason": "one sentence",
       "chaos": "low | medium | high"
@@ -50,30 +52,38 @@ Return STRICT JSON in this format:
 }}
 
 Jobs:
-{json.dumps(jobs, indent=2)}
+{json.dumps(jobs)}
 """
 
-    res = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[{"role": "user", "content": prompt}]
-    )
+    for attempt in range(3):
+        try:
+            res = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}]
+            )
 
-    return json.loads(res.choices[0].message.content)["results"]
+            return json.loads(res.choices[0].message.content)["results"]
+
+        except RateLimitError:
+            time.sleep(3)
+
+    return []
 
 # -----------------------
-# LOAD DATA
+# RUN
 # -----------------------
 jobs = get_jobs()
-
-# run batch scoring (ONLY ONE API CALL)
 scored = score_jobs_batch(jobs)
 
-# sort by score
+if not scored:
+    st.error("API limit hit — try refreshing in a minute.")
+    st.stop()
+
 scored = sorted(scored, key=lambda x: x["score"], reverse=True)
 
 best = scored[0]
 top = scored[:5]
-avoid = scored[-3:]
+avoid = scored[-2:]
 
 # -----------------------
 # UI
@@ -83,7 +93,7 @@ st.subheader("🔥 BEST JOB TODAY")
 st.markdown(f"### {best['title']}")
 st.write(best["reason"])
 st.metric("Score", best["score"])
-st.write(f"Chaos: {best['chaos']}")
+st.write("Chaos:", best["chaos"])
 
 st.divider()
 
@@ -93,7 +103,7 @@ for job in top:
     st.markdown(f"### {job['title']}")
     st.write(f"Score: {job['score']}")
     st.write(job["reason"])
-    st.write(f"Chaos: {job['chaos']}")
+    st.write("Chaos:", job["chaos"])
     st.divider()
 
 st.subheader("🚫 AVOID")
