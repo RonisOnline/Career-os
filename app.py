@@ -2,68 +2,12 @@ import streamlit as st
 import feedparser
 import os
 import json
-import sqlite3
 from openai import OpenAI
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 st.set_page_config(page_title="Career OS Elite", layout="wide")
-
-st.title("🧠 Career OS — Elite Mode (Chaos Detector Enabled)")
-
-# -----------------------
-# MEMORY
-# -----------------------
-conn = sqlite3.connect("memory.db", check_same_thread=False)
-c = conn.cursor()
-
-c.execute("""CREATE TABLE IF NOT EXISTS saved_jobs (title TEXT)""")
-c.execute("""CREATE TABLE IF NOT EXISTS disliked_jobs (title TEXT)""")
-
-def save_job(title):
-    c.execute("INSERT INTO saved_jobs VALUES (?)", (title,))
-    conn.commit()
-
-def dislike_job(title):
-    c.execute("INSERT INTO disliked_jobs VALUES (?)", (title,))
-    conn.commit()
-
-def get_disliked():
-    c.execute("SELECT title FROM disliked_jobs")
-    return [r[0] for r in c.fetchall()]
-
-# -----------------------
-# CHAOS DETECTOR (NEW)
-# -----------------------
-CHAOS_KEYWORDS = [
-    "fast-paced", "wear many hats", "multiple priorities",
-    "self-starter", "no two days are the same", "ambiguity",
-    "ad hoc", "startup environment", "jack of all trades",
-    "unstructured", "rapidly changing", "dynamic environment"
-]
-
-def detect_chaos(text):
-    text_lower = text.lower()
-
-    score = 0
-    hits = []
-
-    for kw in CHAOS_KEYWORDS:
-        if kw in text_lower:
-            score += 1
-            hits.append(kw)
-
-    if score <= 1:
-        level = "🟢 Low Chaos"
-        penalty = 0
-    elif score <= 3:
-        level = "🟡 Medium Chaos"
-        penalty = 10
-    else:
-        level = "🔴 High Chaos"
-        penalty = 25
-
-    return level, penalty, hits
+st.title("🧠 Career OS — Batch Mode (Stable)")
 
 # -----------------------
 # JOB INGESTION
@@ -72,7 +16,7 @@ def get_jobs():
     feed = feedparser.parse("https://remoteok.com/remote-jobs.rss")
 
     jobs = []
-    for e in feed.entries[:25]:
+    for e in feed.entries[:10]:  # reduced for stability
         jobs.append({
             "title": e.title,
             "description": e.summary
@@ -80,28 +24,33 @@ def get_jobs():
     return jobs
 
 # -----------------------
-# AI SCORING
+# BATCH AI SCORING (1 CALL)
 # -----------------------
-def score_job(job):
+def score_jobs_batch(jobs):
     prompt = f"""
-You are a career filtering system.
+You are a career job scoring system.
 
 User wants:
 - structured roles
 - autonomy
 - career growth
-- NOT chaotic admin environments
+- avoid chaotic / vague roles
 
-Job:
-{job['title']}
-{job['description']}
+Return STRICT JSON in this format:
 
-Return STRICT JSON:
 {{
-  "score": 0-100,
-  "reason": "one sentence",
-  "risk": "low | medium | high"
+  "results": [
+    {{
+      "title": "...",
+      "score": 0-100,
+      "reason": "one sentence",
+      "chaos": "low | medium | high"
+    }}
+  ]
 }}
+
+Jobs:
+{json.dumps(jobs, indent=2)}
 """
 
     res = client.chat.completions.create(
@@ -109,79 +58,45 @@ Return STRICT JSON:
         messages=[{"role": "user", "content": prompt}]
     )
 
-    try:
-        return json.loads(res.choices[0].message.content)
-    except:
-        return {"score": 50, "reason": "parse error", "risk": "medium"}
+    return json.loads(res.choices[0].message.content)["results"]
 
 # -----------------------
-# LOAD + FILTER MEMORY
+# LOAD DATA
 # -----------------------
 jobs = get_jobs()
-disliked = get_disliked()
 
-filtered_jobs = [j for j in jobs if j["title"] not in disliked]
+# run batch scoring (ONLY ONE API CALL)
+scored = score_jobs_batch(jobs)
 
-scored = []
+# sort by score
+scored = sorted(scored, key=lambda x: x["score"], reverse=True)
 
-for job in filtered_jobs:
-
-    chaos_level, penalty, hits = detect_chaos(job["description"])
-
-    result = score_job(job)
-
-    # APPLY CHAOS PENALTY
-    result["score"] = max(0, result["score"] - penalty)
-    result["chaos"] = chaos_level
-    result["chaos_hits"] = hits
-
-    scored.append((job, result))
-
-scored.sort(key=lambda x: x[1]["score"], reverse=True)
-
+best = scored[0]
 top = scored[:5]
-best = top[0]
-avoid = scored[-5:]
+avoid = scored[-3:]
 
 # -----------------------
 # UI
 # -----------------------
 st.subheader("🔥 BEST JOB TODAY")
 
-st.markdown(f"### {best[0]['title']}")
-st.write(best[1]["reason"])
-st.metric("Score", best[1]["score"])
-st.write(best[1]["chaos"])
+st.markdown(f"### {best['title']}")
+st.write(best["reason"])
+st.metric("Score", best["score"])
+st.write(f"Chaos: {best['chaos']}")
 
 st.divider()
 
-st.subheader("🔥 TOP 5 JOBS")
+st.subheader("🔥 TOP JOBS")
 
-for job, score in top:
-    with st.container():
-        st.markdown(f"### {job['title']}")
-        st.write(f"Score: {score['score']}")
-        st.write(score["reason"])
-        st.write(score["chaos"])
+for job in top:
+    st.markdown(f"### {job['title']}")
+    st.write(f"Score: {job['score']}")
+    st.write(job["reason"])
+    st.write(f"Chaos: {job['chaos']}")
+    st.divider()
 
-        if score["chaos_hits"]:
-            st.caption("⚠️ Chaos signals: " + ", ".join(score["chaos_hits"]))
+st.subheader("🚫 AVOID")
 
-        col1, col2 = st.columns(2)
-
-        with col1:
-            if st.button("👍 Save", key="save_" + job["title"]):
-                save_job(job["title"])
-                st.success("Saved")
-
-        with col2:
-            if st.button("👎 Hide", key="hide_" + job["title"]):
-                dislike_job(job["title"])
-                st.warning("Hidden")
-
-        st.divider()
-
-st.subheader("🚫 AVOID THESE")
-
-for job, score in avoid:
-    st.write(f"❌ {job['title']} — {score['score']} — {score['chaos']}")
+for job in avoid:
+    st.write(f"❌ {job['title']} — {job['score']} — {job['chaos']}")
